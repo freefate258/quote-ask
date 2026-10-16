@@ -1,0 +1,14 @@
+name: quote-ask
+version: 0.1.0
+manifest_version: 2
+api_version: 1
+description: "Codex-style ask-about-selection for Hermes Desktop: select text in the conversation, and a small pill offers to quote it into the prompt (or copy it as a Markdown quote). Desktop-only — no Python half, no tools, no hooks."
+author: freefate258
+license: MIT
+homepage: https://github.com/freefate258/quote-ask
+tags: [desktop, selection, prompt, quote, copy]
+# Verified against the shipped Desktop build of 0.21.3 (host.composer getDraft /
+# setDraft / insertText / focus, ctx.addEventListener, ctx.os.writeClipboard).
+requires_hermes: ">=0.21.3"
+# Nothing of the Python surface is registered, so neither provides_* list exists.
+# The Desktop half lives in desktop/plugin.js — the installer entry point.
