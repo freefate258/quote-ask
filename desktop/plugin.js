@@ -3,7 +3,7 @@
  *
  * Select text anywhere in the Hermes Desktop conversation, click the small pill
  * that appears above it, and the selection lands in the message composer as a
- * markdown quote with the caret on the line below — ready for your question.
+ * markdown quote, a blank line, and the caret below it — ready for your question.
  *
  * Surfaces used (SDK only, no app markup is queried, no core module is touched):
  *   window.getSelection()  — read the selection and its rectangle
@@ -396,10 +396,11 @@ function focusedSessionId() {
 }
 
 /**
- * Put `markdown` in the composer as a quote and seat the caret below it.
+ * Put `markdown` in the composer as a quote and seat the caret below it, after
+ * a blank line.
  *
- * The draft path is preferred because it is the only one that keeps a trailing
- * newline: `insertText` trims, which would leave the caret glued to the last
+ * The draft path is preferred because it is the only one that keeps trailing
+ * newlines: `insertText` trims, which would leave the caret glued to the last
  * quoted line and the user's question inside the quote. Draft → insert → the
  * clipboard, in that order.
  */
@@ -417,7 +418,9 @@ async function putQuote(markdown) {
     try {
       const current = await composer.getDraft(sid)
       const base = typeof current === 'string' ? current.replace(/\s+$/, '') : ''
-      const next = base ? `${base}\n\n${block}\n` : `${block}\n`
+      // A blank line after the quote is required: in Markdown a line directly under
+      // a `> ` line is a lazy continuation, so the question would stay inside the quote.
+      const next = base ? `${base}\n\n${block}\n\n` : `${block}\n\n`
 
       if (await composer.setDraft(sid, next)) {
         if (typeof composer.focus === 'function') {

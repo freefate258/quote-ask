@@ -151,9 +151,9 @@ describe('quote-ask', () => {
     // Code indentation survives verbatim, prose whitespace is collapsed.
     expect(text).toContain('\n>   const b = 2;')
     expect(text).toContain('>   - 甲一')
-    // A trailing newline is what seats the caret under the quote.
-    expect(text.endsWith('\n')).toBe(true)
-    expect(text.endsWith('\n\n')).toBe(false)
+    // A blank line closes the quote, so the question typed under it is not a lazy continuation.
+    expect(text.endsWith('\n\n')).toBe(true)
+    expect(text.endsWith('\n\n\n')).toBe(false)
     expect(calls.focus).toEqual(['sess-1'])
   })
 
@@ -169,7 +169,7 @@ describe('quote-ask', () => {
     const [, text] = calls.setDraft[0]
 
     expect(text.startsWith('已经写了一半\n\n> ')).toBe(true)
-    expect(text.endsWith('\n')).toBe(true)
+    expect(text.endsWith('\n\n')).toBe(true)
   })
 
   it('copies the selection as a Markdown quote without touching the composer', async () => {

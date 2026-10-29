@@ -6,7 +6,7 @@ Select text anywhere in a conversation (a message, a code block, a diff, a log
 pane) and a small pill appears above the selection:
 
 - **引用提问 / Quote & ask** — the selection lands in the message composer as a
-  Markdown quote, with the caret on the line below, ready for your question.
+  Markdown quote, followed by a blank line and the caret, ready for your question.
 - **复制 / Copy** — the same Markdown quote goes to the clipboard instead.
 
 There is also a command-palette entry, **Quote selection into the prompt**, for
