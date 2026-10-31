@@ -31,6 +31,11 @@ function start() {
 
       return () => {}
     },
+    runAction: id => {
+      calls.runAction.push(id)
+
+      return { ok: true }
+    },
     addEventListener: (target, type, listener, options) => {
       target.addEventListener(type, listener, options)
 
@@ -96,6 +101,9 @@ beforeEach(() => {
 
   composerState.draft = ''
   composerState.broken = false
+  composerState.sessionId = 'sess-1'
+  composerState.storedSessionId = '20261031_abc123'
+  composerState.profile = 'default'
   document.body.innerHTML = ''
 })
 
@@ -110,16 +118,17 @@ afterEach(() => {
 })
 
 describe('quote-ask', () => {
-  it('registers a palette command and both locale bundles', () => {
+  it('registers palette commands for current and new chat plus both locale bundles', () => {
     const handle = start()
-    const command = handle.registrations.find(c => c.area === 'palette')
+    const commands = handle.registrations.filter(c => c.area === 'palette')
 
     expect(plugin.id).toBe('quote-ask')
-    expect(command?.data.id).toBe('quote-ask.ask')
-    expect(typeof command?.data.run).toBe('function')
+    expect(commands.map(c => c.data.id)).toEqual(['quote-ask.ask', 'quote-ask.new-chat'])
+    expect(typeof commands[0]?.data.run).toBe('function')
+    expect(typeof commands[1]?.data.run).toBe('function')
   })
 
-  it('offers ask and copy for a selection in a message', async () => {
+  it('offers ask, new-chat, and copy for a selection in a message', async () => {
     start()
     document.body.innerHTML = TRANSCRIPT
 
@@ -128,6 +137,7 @@ describe('quote-ask', () => {
     expect(pill()).toBeTruthy()
     expect(pill().style.display).toBe('flex')
     expect(action('ask').textContent).toBe('ask')
+    expect(action('new-chat').textContent).toBe('newChat')
     expect(action('copy').textContent).toBe('copy')
     expect(calls.setDraft).toHaveLength(0)
   })
@@ -155,6 +165,49 @@ describe('quote-ask', () => {
     expect(text.endsWith('\n')).toBe(true)
     expect(text.endsWith('\n\n')).toBe(false)
     expect(calls.focus).toEqual(['sess-1'])
+  })
+
+  it('opens a new chat with @session reference and quoted selection when clicking new-chat', async () => {
+    start()
+    document.body.innerHTML = TRANSCRIPT
+
+    await selectByMouse(document.querySelector('[data-role="assistant"]'))
+    action('new-chat').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await tick(60)
+
+    expect(calls.runAction).toEqual(['session.new'])
+    expect(calls.setDraft).toHaveLength(1)
+
+    const [sid, text] = calls.setDraft[0]
+
+    expect(sid).toBe('new')
+    expect(text.startsWith('@session:default/20261031_abc123\n\n> 前面一句 **重点** 后面一句')).toBe(true)
+    expect(text.endsWith('\n')).toBe(true)
+    expect(calls.focus).toEqual(['new'])
+  })
+
+  it('extracts and attaches data:image elements when quoting into a new chat', async () => {
+    start()
+    const tinyPng = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+    document.body.innerHTML = `<div data-role="assistant"><p>看这张图</p><img alt="架构图" src="${tinyPng}" /></div>`
+
+    const attached = []
+    const onAttach = e => attached.push(e.detail)
+    window.addEventListener('hermes:composer-attach-images', onAttach)
+
+    try {
+      await selectByMouse(document.querySelector('[data-role="assistant"]'))
+      action('new-chat').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await tick(60)
+
+      expect(calls.runAction).toEqual(['session.new'])
+      expect(attached).toHaveLength(1)
+      expect(attached[0].target).toBe('main')
+      expect(attached[0].blobs).toHaveLength(1)
+      expect(calls.setDraft[0][1]).toContain('[图片: 架构图]')
+    } finally {
+      window.removeEventListener('hermes:composer-attach-images', onAttach)
+    }
   })
 
   it('keeps an existing draft and separates the quote from it', async () => {
@@ -248,5 +301,19 @@ describe('quote-ask', () => {
 
     expect(calls.setDraft).toHaveLength(1)
     expect(calls.setDraft[0][1].startsWith('> 前面一句')).toBe(true)
+  })
+
+  it('neutralizes @session/@file directives inside quoted text so the composer does not swallow trailing prose into a chip', async () => {
+    start()
+    document.body.innerHTML = `<div data-role="assistant"><p>2. 从左侧会话列表或顶部 Tab 直接按住拖拽原会话到新会话输入框（或输入 <code>@session:&lt;profile&gt;/&lt;id&gt;</code>） | 渲染为会话 Chip；不硬塞全量上下文</p></div>`
+
+    await selectByMouse(document.querySelector('[data-role="assistant"]'))
+    action('ask').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await tick()
+
+    expect(calls.setDraft).toHaveLength(1)
+    const [, text] = calls.setDraft[0]
+    expect(text).toContain('`\u0040\u200Bsession:<profile>/<id>`')
+    expect(text).toContain('| 渲染为会话 Chip；不硬塞全量上下文')
   })
 })

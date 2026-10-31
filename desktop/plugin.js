@@ -4,11 +4,16 @@
  * Select text anywhere in the Hermes Desktop conversation, click the small pill
  * that appears above it, and the selection lands in the message composer as a
  * markdown quote with the caret on the line below — ready for your question.
+ * Or click "Quote to new chat" to spin up a fresh session pre-populated with
+ * a @session reference to the origin conversation, any selected images, and
+ * the markdown quote.
  *
  * Surfaces used (SDK only, no app markup is queried, no core module is touched):
  *   window.getSelection()  — read the selection and its rectangle
  *   host.composer          — write the quote into the live draft
- *   ctx.register           — a command-palette entry
+ *   host.newChat           — open a fresh session draft
+ *   ctx.runAction          — built-in 'session.new' action
+ *   ctx.register           — command-palette entries
  *   ctx.addEventListener   — document listeners, torn down on unload/disable
  *   ctx.os.writeClipboard  — fallback when no composer is mounted
  */
@@ -21,7 +26,7 @@ const MAX_CHARS = 4000
 
 /** Marks our own chrome, both for styling and for "is this my element" checks. */
 const ATTR = 'data-quote-ask'
-/** The pill's action buttons (quote & ask / copy). */
+/** The pill's action buttons (quote & ask / quote to new chat / copy). */
 const BTN_ATTR = 'data-quote-ask-action'
 const STYLE_ID = 'quote-ask-styles'
 
@@ -29,9 +34,12 @@ const MESSAGES = {
   en: {
     ask: 'Quote & ask',
     hint: 'Put this selection in the prompt, then type your question',
+    newChat: 'Quote to new chat',
+    newChatHint: 'Start a new session quoting this selection (with origin session & images)',
     copy: 'Copy',
     copyHint: 'Copy this selection as a Markdown quote',
     palette: 'Quote selection into the prompt',
+    paletteNewChat: 'Quote selection into a new chat',
     nothing: 'Select some text in the conversation first.',
     noComposer: 'No open composer to put the quote in — copied it to the clipboard instead.',
     copied: 'Quote copied to the clipboard.',
@@ -43,9 +51,12 @@ const MESSAGES = {
   zh: {
     ask: '引用提问',
     hint: '把选中的内容放进输入框，然后写下你的问题',
+    newChat: '引至新会话',
+    newChatHint: '开启新会话并自动填入引用内容（附带原会话链接与选中图片）',
     copy: '复制',
     copyHint: '把选中的内容复制为 Markdown 引用',
     palette: '引用选中内容并提问',
+    paletteNewChat: '引用选中内容开启新会话',
     nothing: '先在对话里选中一段文字。',
     noComposer: '现在没有可写入的输入框，已把引用复制到剪贴板。',
     copied: '引用已复制到剪贴板。',
@@ -56,13 +67,28 @@ const MESSAGES = {
   }
 }
 
-// ── selection → markdown ─────────────────────────────────────────────────────
+// ── selection → markdown & images ────────────────────────────────────────────
 
 const BLOCK_TAGS = new Set([
   'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DD', 'DETAILS', 'DIV', 'DL', 'DT',
   'FIGCAPTION', 'FIGURE', 'FOOTER', 'FORM', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
   'HEADER', 'LI', 'MAIN', 'NAV', 'P', 'SECTION', 'SUMMARY'
 ])
+
+/** Hermes reference tokens (`@file:...`, `@session:...`, etc.) that the
+ *  composer's `REF_RE` (`reference-kinds.ts`) parses into non-editable chips.
+ *  When such a token appears inside quoted prose (`> ...`) or an inline `<code>`
+ *  span (e.g. `` `@session:<profile>/<id>` ``), its unescaped `@kind:` prefix
+ *  or closing backtick/quote causes `REF_RE` to mis-tokenize the draft and
+ *  swallow surrounding text into the chip's hidden `title`/`data-ref-id`
+ *  attribute. Inserting a zero-width space (`\u200B`) after `@` inside quoted
+ *  content keeps the visual text identical while preventing `REF_RE` from
+ *  hijacking quoted mentions as live composer directives. */
+const QUOTED_DIRECTIVE_RE = /@(file|folder|url|image|tool|line|terminal|session|git|diff|staged)\b/gi
+
+function neutralizeQuotedDirectives(text) {
+  return String(text || '').replace(QUOTED_DIRECTIVE_RE, '@\u200B$1')
+}
 
 function tagOf(node) {
   return (node.tagName || '').toUpperCase()
@@ -111,8 +137,14 @@ function listToMarkdown(list, depth, ordered) {
     .join('\n')
 }
 
+function isDataImage(src) {
+  return /^data:image\//i.test(String(src || '').trim())
+}
+
 /** Serialize one node of a cloned selection fragment. Code keeps its newlines,
- *  prose is collapsed, blocks are separated by blank lines. */
+ *  prose is collapsed, blocks are separated by blank lines. Huge data:image
+ *  URLs are attached as real composer image chips rather than dumped as raw
+ *  base64 text into the markdown quote. */
 function walk(node, depth) {
   if (node.nodeType === 3) {
     return (node.nodeValue || '').replace(/\s+/g, ' ')
@@ -147,10 +179,14 @@ function walk(node, depth) {
     case 'S':
       return `~~${kids()}~~`
     case 'IMG': {
-      const alt = node.getAttribute('alt') || ''
-      const src = node.getAttribute('src') || ''
+      const alt = node.getAttribute('alt') || 'image'
+      const src = (node.getAttribute('src') || '').trim()
 
-      return src ? `![${alt}](${src})` : ''
+      if (!src) {
+        return ''
+      }
+
+      return isDataImage(src) ? `[图片: ${alt}]` : `![${alt}](${src})`
     }
     case 'A': {
       const href = node.getAttribute('href') || ''
@@ -189,6 +225,25 @@ function toMarkdown(fragment) {
   return tidy(Array.from(fragment.childNodes).map(node => walk(node, 0)).join(''))
 }
 
+function extractImagesFromFragment(fragment) {
+  if (!fragment || typeof fragment.querySelectorAll !== 'function') {
+    return []
+  }
+
+  const seen = new Set()
+  const urls = []
+
+  for (const img of Array.from(fragment.querySelectorAll('img'))) {
+    const src = (img.getAttribute('src') || '').trim()
+    if (src && !seen.has(src)) {
+      seen.add(src)
+      urls.push(src)
+    }
+  }
+
+  return urls
+}
+
 function cut(text, note) {
   if (text.length <= MAX_CHARS) {
     return text
@@ -201,11 +256,117 @@ function cut(text, note) {
   return `${body}\n\n${note}`
 }
 
-function toQuoteBlock(markdown) {
-  return markdown
+function toQuoteBlock(markdown, opts = {}) {
+  const safe = opts.forComposer ? neutralizeQuotedDirectives(markdown) : markdown
+  return safe
     .split('\n')
     .map(line => (line ? `> ${line}` : '>'))
     .join('\n')
+}
+
+function formatRefValue(value) {
+  if (!/[\s()[\]{}<>"'`]/.test(value)) {
+    return value
+  }
+  if (!value.includes('`')) {
+    return `\`${value}\``
+  }
+  if (!value.includes('"')) {
+    return `"${value}"`
+  }
+  if (!value.includes("'")) {
+    return `'${value}'`
+  }
+  return value
+}
+
+function originSessionRef() {
+  const state = host && host.state
+  if (!state) {
+    return ''
+  }
+
+  const storedAtom = state.focusedStoredSessionId
+  const focusedAtom = state.focusedSessionId
+  const activeAtom = state.activeSessionId
+  const profileAtom = state.focusedSessionProfile || state.profile
+
+  const sid =
+    (storedAtom && typeof storedAtom.get === 'function' && storedAtom.get()) ||
+    (focusedAtom && typeof focusedAtom.get === 'function' && focusedAtom.get()) ||
+    (activeAtom && typeof activeAtom.get === 'function' && activeAtom.get()) ||
+    ''
+
+  const cleanId = String(sid || '').trim()
+  if (!cleanId || cleanId === 'new' || cleanId.startsWith('__new__')) {
+    return ''
+  }
+
+  const profile =
+    (profileAtom && typeof profileAtom.get === 'function' ? String(profileAtom.get() || '').trim() : '') || 'default'
+
+  const target = cleanId.includes('/') ? cleanId : `${profile}/${cleanId}`
+  return `@session:${formatRefValue(target)}`
+}
+
+function dataUrlToBlob(dataUrl) {
+  const match = /^data:([\w./+-]+);base64,(.*)$/i.exec(String(dataUrl || '').trim())
+  if (!match || typeof atob !== 'function' || typeof Blob === 'undefined') {
+    return null
+  }
+  try {
+    const bytes = atob(match[2])
+    const buffer = new Uint8Array(bytes.length)
+    for (let i = 0; i < bytes.length; i += 1) {
+      buffer[i] = bytes.charCodeAt(i)
+    }
+    return new Blob([buffer], { type: match[1] })
+  } catch {
+    return null
+  }
+}
+
+async function resolveImageBlobs(urls) {
+  if (!Array.isArray(urls) || !urls.length) {
+    return []
+  }
+
+  const blobs = []
+  for (const url of urls) {
+    if (isDataImage(url)) {
+      const b = dataUrlToBlob(url)
+      if (b && b.size > 0) {
+        blobs.push(b)
+      }
+      continue
+    }
+
+    if (typeof fetch === 'function' && /^(?:https?|blob|file):/i.test(url)) {
+      try {
+        const res = await fetch(url)
+        const b = await res.blob()
+        if (b && b.size > 0 && (!b.type || b.type.startsWith('image/'))) {
+          blobs.push(b)
+        }
+      } catch {
+        // Ignore fetch errors for inaccessible remote URLs; markdown link still survives in text.
+      }
+    }
+  }
+
+  return blobs
+}
+
+function attachImagesToComposer(blobs, target = 'active') {
+  if (!blobs.length || typeof window === 'undefined' || typeof CustomEvent === 'undefined') {
+    return
+  }
+
+  window.dispatchEvent(
+    new CustomEvent('hermes:composer-attach-images', {
+      detail: { blobs, target }
+    })
+  )
 }
 
 // ── widget state ─────────────────────────────────────────────────────────────
@@ -213,8 +374,9 @@ function toQuoteBlock(markdown) {
 let ctx = null
 let pill = null
 let askButton = null
+let newChatButton = null
 let copyButton = null
-/** The selection the pill is currently offering: { markdown, x, top, bottom }. */
+/** The selection the pill is currently offering: { markdown, images, sessionRef, x, top, bottom }. */
 let pending = null
 
 function t(key, ...args) {
@@ -243,7 +405,7 @@ function isEditable(element) {
   return matches(element, '[contenteditable=""],[contenteditable="true"],[contenteditable="plaintext-only"],textarea,input')
 }
 
-/** The live selection as markdown + the rectangle the pill hangs off, or null. */
+/** The live selection as markdown + images + rectangle, or null. */
 function readSelection() {
   if (typeof window === 'undefined' || !window.getSelection) {
     return null
@@ -263,9 +425,11 @@ function readSelection() {
   }
 
   const range = sel.getRangeAt(0)
-  const markdown = cut(toMarkdown(range.cloneContents()), t('truncated'))
+  const fragment = range.cloneContents()
+  const images = extractImagesFromFragment(fragment)
+  const markdown = cut(toMarkdown(fragment), t('truncated'))
 
-  if (!markdown) {
+  if (!markdown && !images.length) {
     return null
   }
 
@@ -275,7 +439,14 @@ function readSelection() {
   const bottom = rect && (rect.bottom || rect.height) ? rect.bottom : top
   const x = width ? rect.left + width / 2 : rect ? rect.left + 60 : 120
 
-  return { markdown, x, top, bottom }
+  return {
+    markdown,
+    images,
+    sessionRef: originSessionRef(),
+    x,
+    top,
+    bottom
+  }
 }
 
 // ── the pill ─────────────────────────────────────────────────────────────────
@@ -328,14 +499,17 @@ function ensurePill() {
   injectStyles()
 
   const wrap = document.createElement('div')
-  const button = actionButton('ask', () => ask(pending ? pending.markdown : null))
+  const button = actionButton('ask', () => ask(pending))
+  const newChat = actionButton('new-chat', () => askInNewChat(pending))
   const copy = actionButton('copy', () => copyQuote(pending ? pending.markdown : null))
-  const separator = document.createElement('span')
+  const sep1 = document.createElement('span')
+  const sep2 = document.createElement('span')
 
   wrap.setAttribute(ATTR, 'pill')
   wrap.setAttribute('role', 'toolbar')
-  separator.setAttribute(BTN_ATTR, 'separator')
-  wrap.append(button, separator, copy)
+  sep1.setAttribute(BTN_ATTR, 'separator')
+  sep2.setAttribute(BTN_ATTR, 'separator')
+  wrap.append(button, sep1, newChat, sep2, copy)
 
   // A click on the pill must not collapse the browser selection before the
   // click handler runs — the quote is captured at selection time anyway, but
@@ -348,6 +522,7 @@ function ensurePill() {
 
   pill = wrap
   askButton = button
+  newChatButton = newChat
   copyButton = copy
 
   return pill
@@ -355,7 +530,7 @@ function ensurePill() {
 
 function positionPill(info) {
   const margin = 8
-  const width = pill.offsetWidth || 96
+  const width = pill.offsetWidth || 168
   const height = pill.offsetHeight || 26
   const half = width / 2
   const limit = Math.max(half + margin, window.innerWidth - half - margin)
@@ -371,6 +546,8 @@ function showPill(info) {
   ensurePill()
   askButton.textContent = t('ask')
   askButton.title = t('hint')
+  newChatButton.textContent = t('newChat')
+  newChatButton.title = t('newChatHint')
   copyButton.textContent = t('copy')
   copyButton.title = t('copyHint')
   pending = info
@@ -403,21 +580,27 @@ function focusedSessionId() {
  * quoted line and the user's question inside the quote. Draft → insert → the
  * clipboard, in that order.
  */
-async function putQuote(markdown) {
+async function putQuote(markdown, opts = {}) {
   const composer = host && host.composer
 
   if (!composer) {
     return false
   }
 
-  const sid = focusedSessionId() || null
-  const block = toQuoteBlock(markdown)
+  const sid = opts.targetSessionId !== undefined ? opts.targetSessionId : focusedSessionId() || null
+  const prefix = opts.prefix ? `${opts.prefix}\n\n` : ''
+  const block = markdown ? toQuoteBlock(markdown, { forComposer: true }) : ''
+  const payload = `${prefix}${block}`.trim()
+
+  if (!payload) {
+    return false
+  }
 
   if (typeof composer.getDraft === 'function' && typeof composer.setDraft === 'function') {
     try {
-      const current = await composer.getDraft(sid)
+      const current = opts.fresh ? '' : await composer.getDraft(sid)
       const base = typeof current === 'string' ? current.replace(/\s+$/, '') : ''
-      const next = base ? `${base}\n\n${block}\n` : `${block}\n`
+      const next = base ? `${base}\n\n${payload}\n` : `${payload}\n`
 
       if (await composer.setDraft(sid, next)) {
         if (typeof composer.focus === 'function') {
@@ -433,7 +616,7 @@ async function putQuote(markdown) {
 
   if (typeof composer.insertText === 'function') {
     try {
-      if (await composer.insertText(sid, block, { mode: 'block' })) {
+      if (await composer.insertText(sid, payload, { mode: 'block' })) {
         if (typeof composer.focus === 'function') {
           composer.focus(sid)
         }
@@ -460,24 +643,40 @@ function clearHighlight() {
   }
 }
 
-/** The markdown to quote: the text the pill captured, or the live selection. */
-function resolveQuote(markdown) {
-  if (markdown != null) {
-    return tidy(markdown)
+/** Resolve selection snapshot from a pill click or command-palette invocation. */
+function resolvePayload(input) {
+  if (input && typeof input === 'object' && ('markdown' in input || 'images' in input)) {
+    return {
+      markdown: tidy(input.markdown || ''),
+      images: Array.isArray(input.images) ? input.images : [],
+      sessionRef: input.sessionRef || originSessionRef()
+    }
+  }
+
+  if (typeof input === 'string') {
+    return {
+      markdown: tidy(input),
+      images: [],
+      sessionRef: originSessionRef()
+    }
   }
 
   const info = readSelection()
 
-  return tidy(info ? info.markdown : '')
+  return {
+    markdown: tidy(info ? info.markdown : ''),
+    images: info && Array.isArray(info.images) ? info.images : [],
+    sessionRef: info ? info.sessionRef : originSessionRef()
+  }
 }
 
-/** Quote the given markdown (or the current selection) into the prompt. */
-async function ask(markdown) {
-  const body = resolveQuote(markdown)
+/** Quote the given selection into the active prompt. */
+async function ask(input) {
+  const { markdown, images } = resolvePayload(input)
 
   hidePill()
 
-  if (!body) {
+  if (!markdown && !images.length) {
     host.notify({ kind: 'info', message: t('nothing') })
 
     return
@@ -485,7 +684,19 @@ async function ask(markdown) {
 
   clearHighlight()
 
-  const quoted = cut(body, t('truncated'))
+  const quoted = markdown ? cut(markdown, t('truncated')) : ''
+  const blobs = await resolveImageBlobs(images)
+
+  if (blobs.length) {
+    attachImagesToComposer(blobs, 'active')
+  }
+
+  if (!quoted) {
+    if (host.composer && typeof host.composer.focus === 'function') {
+      host.composer.focus(focusedSessionId() || null)
+    }
+    return
+  }
 
   if (await putQuote(quoted)) {
     return
@@ -498,9 +709,89 @@ async function ask(markdown) {
   host.notify({ kind: copied ? 'info' : 'error', message: t(copied ? 'noComposer' : 'failed') })
 }
 
+function waitTick(ms = 24) {
+  return new Promise(resolve => {
+    if (ctx && typeof ctx.setTimeout === 'function') {
+      ctx.setTimeout(resolve, ms)
+    } else {
+      setTimeout(resolve, ms)
+    }
+  })
+}
+
+function openFreshChat() {
+  if (ctx && typeof ctx.runAction === 'function') {
+    try {
+      const res = ctx.runAction('session.new')
+      if (res && res.ok) {
+        return true
+      }
+    } catch {
+      // Fall through to host.newChat
+    }
+  }
+
+  if (host && typeof host.newChat === 'function') {
+    try {
+      host.newChat()
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  return false
+}
+
+/** Open a brand-new session and populate its composer with @session ref + images + quote. */
+async function askInNewChat(input) {
+  const { markdown, images, sessionRef } = resolvePayload(input)
+
+  hidePill()
+
+  if (!markdown && !images.length) {
+    host.notify({ kind: 'info', message: t('nothing') })
+
+    return
+  }
+
+  clearHighlight()
+
+  const quoted = markdown ? cut(markdown, t('truncated')) : ''
+  const blobs = await resolveImageBlobs(images)
+
+  openFreshChat()
+  await waitTick(24)
+
+  if (blobs.length) {
+    attachImagesToComposer(blobs, 'main')
+  }
+
+  // Try addressing the fresh draft ('new') first, then fall back to the active composer (null).
+  const landed =
+    (await putQuote(quoted, { targetSessionId: 'new', prefix: sessionRef, fresh: true })) ||
+    (await putQuote(quoted, { targetSessionId: null, prefix: sessionRef, fresh: true }))
+
+  if (landed) {
+    return
+  }
+
+  if (!quoted && blobs.length) {
+    if (host.composer && typeof host.composer.focus === 'function') {
+      host.composer.focus(null)
+    }
+    return
+  }
+
+  const fallbackText = [sessionRef, quoted ? toQuoteBlock(quoted) : ''].filter(Boolean).join('\n\n')
+  const copied = await writeClipboard(`${fallbackText}\n`)
+
+  host.notify({ kind: copied ? 'info' : 'error', message: t(copied ? 'noComposer' : 'failed') })
+}
+
 /** Copy the given markdown (or the current selection) as a Markdown quote. */
 async function copyQuote(markdown) {
-  const body = resolveQuote(markdown)
+  const { markdown: body } = resolvePayload(markdown)
 
   hidePill()
 
@@ -589,6 +880,7 @@ export default {
       pending = null
       pill = null
       askButton = null
+      newChatButton = null
       copyButton = null
       ctx = null
     })
@@ -606,6 +898,19 @@ export default {
       }
     })
 
-    console.info('[quote-ask] ready — select text in a conversation to quote it into the prompt')
+    ctx.register({
+      id: 'quote-selection-new-chat',
+      area: PALETTE_AREA,
+      data: {
+        id: 'quote-ask.new-chat',
+        label: ctx.i18n.t('paletteNewChat'),
+        keywords: ['quote', 'new', 'chat', 'session', 'selection', '引用', '新会话', '新建', '对话'],
+        run: () => {
+          askInNewChat(null)
+        }
+      }
+    })
+
+    console.info('[quote-ask] ready — select text in a conversation to quote it into the prompt or a new chat')
   }
 }

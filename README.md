@@ -7,10 +7,13 @@ pane) and a small pill appears above the selection:
 
 - **引用提问 / Quote & ask** — the selection lands in the message composer as a
   Markdown quote, with the caret on the line below, ready for your question.
+- **引至新会话 / Quote to new chat** — opens a fresh session and populates its
+  composer with an `@session:<profile>/<id>` reference to the origin chat, any
+  selected images, and the Markdown quote.
 - **复制 / Copy** — the same Markdown quote goes to the clipboard instead.
 
-There is also a command-palette entry, **Quote selection into the prompt**, for
-when the pill is out of reach.
+There are also command-palette entries, **Quote selection into the prompt** and
+**Quote selection into a new chat**, for when the pill is out of reach.
 
 ## Install
 
@@ -58,7 +61,7 @@ cp desktop/plugin.js .quote-ask-test/
 cd .quote-ask-test && ../node_modules/.bin/vitest run
 ```
 
-10 tests, all passing against the content of this repo.
+13 tests, all passing against the content of this repo.
 
 ## Layout
 
