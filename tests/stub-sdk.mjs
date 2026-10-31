@@ -10,19 +10,30 @@ export const calls = {
   insertText: [],
   focus: [],
   notify: [],
-  clipboard: []
+  clipboard: [],
+  newChat: [],
+  runAction: []
 }
 
 export const composerState = {
   /** Draft the fake composer currently holds. */
   draft: '',
   /** Make every write verb fail, to exercise the fallback path. */
-  broken: false
+  broken: false,
+  sessionId: 'sess-1',
+  storedSessionId: '20261031_abc123',
+  profile: 'default'
 }
 
 export const host = {
   state: {
-    focusedSessionId: { get: () => composerState.sessionId ?? 'sess-1' }
+    focusedSessionId: { get: () => composerState.sessionId ?? 'sess-1' },
+    focusedStoredSessionId: { get: () => composerState.storedSessionId ?? '20261031_abc123' },
+    focusedSessionProfile: { get: () => composerState.profile ?? 'default' },
+    profile: { get: () => composerState.profile ?? 'default' }
+  },
+  newChat: profile => {
+    calls.newChat.push(profile)
   },
   notify: payload => {
     calls.notify.push(payload)
